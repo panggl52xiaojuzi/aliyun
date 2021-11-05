@@ -1,0 +1,354 @@
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: alibaba-log-configuration
+  namespace: kube-system
+data:
+    
+    log-project: "k8s-log-c24b671e9a2b04a1eb5e5c3021629305e"
+    
+    
+    log-endpoint: "cn-shanghai-intranet.log.aliyuncs.com"
+    
+    log-machine-group: "k8s-group-c24b671e9a2b04a1eb5e5c3021629305e"
+    
+    log-config-path: "/etc/ilogtail/conf/cn-shanghai/ilogtail_config.json"
+    
+    log-ali-uid: "1543428740671114"
+    cpu-core-limit: "2"
+    mem-limit: "512"
+    max-bytes-per-sec: "209715200"
+    send-requests-concurrency: "20"
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: alibaba-log-controller
+  namespace: kube-system
+  labels:
+    k8s-app: alibaba-log-controller
+  annotations:
+    component.version: "v0.2.9"
+    component.revision: "v1"
+spec:
+  selector:
+    matchLabels:
+      k8s-app: alibaba-log-controller
+  replicas: 1
+  template:
+    metadata:
+      labels:
+        k8s-app: alibaba-log-controller
+      annotations:
+        scheduler.alpha.kubernetes.io/critical-pod: ''
+    spec:
+      priorityClassName: system-cluster-critical
+      serviceAccountName: alibaba-log-controller
+      tolerations:
+        - effect: NoSchedule
+          key: node-role.kubernetes.io/master
+      containers:
+      - name: alibaba-log-controller
+        image: registry-vpc.cn-shanghai.aliyuncs.com/acs/log-controller:0.2.9.0-3fde765-aliyun
+        resources:
+          limits:
+            cpu: 200m
+            memory: 400Mi
+          requests:
+            cpu: 50m
+            memory: 100Mi
+        livenessProbe:
+          exec:
+            command:
+            - /bin/sh
+            - -c
+            - ps -ef | grep -v grep | grep run-controller.sh
+          initialDelaySeconds: 5
+          periodSeconds: 30
+        readinessProbe:
+          exec:
+            command:
+            - /bin/sh
+            - -c
+            - ps -ef | grep -v grep | grep run-controller.sh
+          initialDelaySeconds: 5
+          periodSeconds: 30
+        securityContext:
+          allowPrivilegeEscalation: false
+          runAsNonRoot: true
+          runAsUser: 54321
+        env:
+          - name: "ALICLOUD_LOG_PROJECT"
+            valueFrom:
+              configMapKeyRef:
+                name: alibaba-log-configuration
+                key: log-project
+          - name: "ALICLOUD_LOG_ENDPOINT"
+            valueFrom:
+              configMapKeyRef:
+                name: alibaba-log-configuration
+                key: log-endpoint
+          - name: "ALICLOUD_LOG_MACHINE_GROUP"
+            valueFrom:
+              configMapKeyRef:
+                name: alibaba-log-configuration
+                key: log-machine-group
+          - name: "ALICLOUD_ACS_K8S_FLAG"
+            value: "true"
+          - name: "ALICLOUD_LOG_TAG_KEY"
+            value: "ack.aliyun.com"
+          - name: "ALICLOUD_LOG_TAG_VALUE"
+            value: "c24b671e9a2b04a1eb5e5c3021629305e"
+          - name: "ALICLOUD_LOG_PRODUCT_ENDPOINT"
+            valueFrom:
+              configMapKeyRef:
+                name: alibaba-log-configuration
+                key: log-endpoint
+        volumeMounts:
+        - name: addon-token
+          mountPath: "/var/addon"
+          readOnly: true
+      volumes:
+      - name: addon-token
+        secret:
+          secretName: addon.log.token
+          optional: true
+          items:
+          - key: addon.token.config
+            path: token-config
+
+      nodeSelector:
+        beta.kubernetes.io/os: linux
+
+---
+apiVersion: apiextensions.k8s.io/v1beta1
+kind: CustomResourceDefinition
+metadata:
+  name: aliyunlogconfigs.log.alibabacloud.com
+spec:
+  group: log.alibabacloud.com
+  version: v1alpha1
+  names:
+    kind: AliyunLogConfig
+    plural: aliyunlogconfigs
+  scope: Namespaced
+---
+apiVersion: rbac.authorization.k8s.io/v1beta1
+kind: ClusterRoleBinding
+metadata:
+  name: alibaba-log-controller
+subjects:
+- kind: ServiceAccount
+  name: alibaba-log-controller
+  namespace: kube-system
+roleRef:
+  kind: ClusterRole
+  name: alibaba-log-controller
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: rbac.authorization.k8s.io/v1beta1
+kind: ClusterRole
+metadata:
+  name: alibaba-log-controller
+  labels:
+    k8s-app: alibaba-log-controller
+rules:
+- apiGroups: ["log.alibabacloud.com"]
+  resources:
+  - aliyunlogconfigs
+  verbs:
+  - update
+  - get
+  - watch
+  - list
+- apiGroups: [""]
+  resources:
+  - configmaps
+  verbs:
+  - create
+  - update
+  - get
+- apiGroups: [""]
+  resources:
+  - events
+  verbs:
+  - create
+  - patch
+  - update
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: alibaba-log-controller
+  namespace: kube-system
+  labels:
+    k8s-app: alibaba-log-controller
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: logtail-ds
+  namespace: kube-system
+  labels:
+    k8s-app: logtail-ds
+  annotations:
+    component.version: "0.16.62"
+    component.revision: "1"
+spec:
+  selector:
+    matchLabels:
+      k8s-app: logtail-ds
+  updateStrategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 10%
+  template:
+    metadata:
+      labels:
+        k8s-app: logtail-ds
+      annotations:
+        scheduler.alpha.kubernetes.io/critical-pod: ''
+    spec:
+      hostNetwork: true
+      priorityClassName: system-cluster-critical
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+            - matchExpressions:
+              - key: type
+                operator: NotIn
+                values:
+                - virtual-kubelet
+      tolerations:
+        - operator: Exists
+      containers:
+      - name: logtail
+        image: registry-vpc.cn-shanghai.aliyuncs.com/acs/logtail:v0.16.62.2-da583e0-aliyun
+        resources:
+          limits:
+            cpu: 500m
+            memory: 1024Mi
+          requests:
+            cpu: 100m
+            memory: 256Mi
+        livenessProbe:
+          httpGet:
+            path: /liveness
+            port: 7953
+            scheme: HTTP
+          initialDelaySeconds: 35
+          periodSeconds: 60
+        readinessProbe:
+          httpGet:
+            path: /liveness
+            port: 7953
+            scheme: HTTP
+          initialDelaySeconds: 35
+          periodSeconds: 60
+        securityContext:
+          allowPrivilegeEscalation: false
+          privileged: false
+          procMount: Default
+        env:
+          - name: "ALIYUN_LOGTAIL_CONFIG"
+            valueFrom:
+              configMapKeyRef:
+                name: alibaba-log-configuration
+                key: log-config-path
+          - name: "ALIYUN_LOGTAIL_USER_ID"
+            valueFrom:
+              configMapKeyRef:
+                name: alibaba-log-configuration
+                key: log-ali-uid
+          - name: "ALIYUN_LOGTAIL_USER_DEFINED_ID"
+            valueFrom:
+              configMapKeyRef:
+                name: alibaba-log-configuration
+                key: log-machine-group
+          - name: "ALICLOUD_LOG_DOCKER_ENV_CONFIG"
+            value: "true"
+          - name: "ALICLOUD_LOG_ECS_FLAG"
+            value: "true"
+          - name: "ALICLOUD_LOG_DEFAULT_PROJECT"
+            valueFrom:
+              configMapKeyRef:
+                name: alibaba-log-configuration
+                key: log-project
+          - name: "ALICLOUD_LOG_ENDPOINT"
+            valueFrom:
+              configMapKeyRef:
+                name: alibaba-log-configuration
+                key: log-endpoint
+          - name: "ALICLOUD_LOG_DEFAULT_MACHINE_GROUP"
+            valueFrom:
+              configMapKeyRef:
+                name: alibaba-log-configuration
+                key: log-machine-group
+          - name: "ALIYUN_LOG_ENV_TAGS"
+            value: "_node_name_|_node_ip_"
+          - name: "_node_name_"
+            valueFrom:
+              fieldRef:
+                fieldPath: spec.nodeName
+          - name: "_node_ip_"
+            valueFrom:
+              fieldRef:
+                fieldPath: status.hostIP
+          # resource limit for logtail self process
+          - name: "cpu_usage_limit"
+            valueFrom:
+              configMapKeyRef:
+                name: alibaba-log-configuration
+                key: cpu-core-limit
+          - name: "mem_usage_limit"
+            valueFrom:
+              configMapKeyRef:
+                name: alibaba-log-configuration
+                key: mem-limit
+          - name: "max_bytes_per_sec"
+            valueFrom:
+              configMapKeyRef:
+                name: alibaba-log-configuration
+                key: max-bytes-per-sec
+          - name: "send_request_concurrency"
+            valueFrom:
+              configMapKeyRef:
+                name: alibaba-log-configuration
+                key: send-requests-concurrency
+          - name: "HTTP_PROBE_PORT"
+            value: "7953"
+        volumeMounts:
+        - name: run
+          mountPath: /var/run
+        - name: root
+          mountPath: /logtail_host
+          readOnly: true
+          mountPropagation: HostToContainer
+        - name: addon-token
+          mountPath: "/var/addon"
+          readOnly: true
+
+      terminationGracePeriodSeconds: 30
+      nodeSelector:
+        beta.kubernetes.io/os: linux
+      volumes:
+      - name: run
+        hostPath:
+          path: /var/run
+          type: Directory
+      - name: root
+        hostPath:
+          path: /
+          type: Directory
+      - name: addon-token
+        secret:
+          secretName: addon.log.token
+          optional: true
+          items:
+          - key: addon.token.config
+            path: token-config
+
+---
