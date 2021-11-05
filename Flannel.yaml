@@ -1,0 +1,367 @@
+---
+kind: ClusterRole
+apiVersion: rbac.authorization.k8s.io/v1beta1
+metadata:
+  name: flannel
+rules:
+  - apiGroups:
+      - ""
+    resources:
+      - pods
+    verbs:
+      - get
+  - apiGroups:
+      - ""
+    resources:
+      - nodes
+    verbs:
+      - list
+      - watch
+      - put
+  - apiGroups:
+      - ""
+    resources:
+      - nodes/status
+    verbs:
+      - patch
+---
+kind: ClusterRoleBinding
+apiVersion: rbac.authorization.k8s.io/v1beta1
+metadata:
+  name: flannel
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: flannel
+subjects:
+- kind: ServiceAccount
+  name: flannel
+  namespace: kube-system
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: flannel
+  namespace: kube-system
+---
+kind: ConfigMap
+apiVersion: v1
+metadata:
+  name: kube-flannel-cfg
+  namespace: kube-system
+  labels:
+    tier: node
+    app: flannel
+data:
+  cni-conf.json: |
+    {
+      "name": "cb0",
+      "cniVersion":"0.3.1",
+      "type": "flannel",
+      "delegate": {
+        "isDefaultGateway": true
+      }
+    }
+  net-conf.json: |
+    {
+      "Network": "10.164.0.0/16",
+      "Backend": {
+        "Type": "alloc"
+      }
+    }
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: kube-flannel-ds
+  namespace: kube-system
+  labels:
+    tier: node
+    app: flannel
+spec:
+  selector:
+    matchLabels:
+      tier: node
+      app: flannel
+  updateStrategy:
+    type: OnDelete
+  template:
+    metadata:
+      labels:
+        tier: node
+        app: flannel
+      annotations:
+        scheduler.alpha.kubernetes.io/critical-pod: ""
+    spec:
+      tolerations:
+      - operator: Exists
+      serviceAccountName: flannel
+      hostNetwork: true
+      nodeSelector:
+        kubernetes.io/os: linux
+      priorityClassName: system-node-critical
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+            - matchExpressions:
+              - key: type
+                operator: NotIn
+                values:
+                - virtual-kubelet
+      containers:
+      - name: kube-flannel
+        image: registry-vpc.cn-hongkong.aliyuncs.com/acs/flannel:v0.13.0.2-466064b-aliyun
+        imagePullPolicy: IfNotPresent
+        command:
+        - bash
+        - -c
+        - mount -o remount rw /proc/sys && /opt/bin/flanneld --ip-masq --kube-subnet-mgr --set-node-network-unavailable=false
+        resources:
+          requests:
+            cpu: "100m"
+            memory: "100Mi"
+          limits:
+            cpu: "100m"
+            memory: "256Mi"
+        securityContext:
+          readOnlyRootFilesystem: false
+          privileged: false
+          capabilities:
+             add:
+             - NET_ADMIN
+             - SYS_ADMIN
+        livenessProbe:
+          exec:
+            command:
+            - sh
+            - -c
+            - ls -l /run/flannel/subnet.env
+          failureThreshold: 8
+          initialDelaySeconds: 15
+          periodSeconds: 30
+          successThreshold: 1
+          timeoutSeconds: 15
+        readinessProbe:
+          exec:
+            command:
+            - sh
+            - -c
+            - ls -l /run/flannel/subnet.env
+        env:
+        - name: POD_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.name
+        - name: POD_NAMESPACE
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.namespace
+        volumeMounts:
+        - name: run
+          mountPath: /run
+        - name: flannel-cfg
+          mountPath: /etc/kube-flannel/
+      initContainers:
+      - name: install-cni
+        image: registry-vpc.cn-hongkong.aliyuncs.com/acs/flannel:v0.13.0.2-466064b-aliyun
+        imagePullPolicy: IfNotPresent
+        command: [ "/bin/sh", "-c", "set -e -x; cp -f /etc/kube-flannel/cni-conf.json /etc/cni/net.d/10-flannel.conf" ]
+        volumeMounts:
+        - name: cni
+          mountPath: /etc/cni/net.d
+        - name: flannel-cfg
+          mountPath: /etc/kube-flannel/
+        securityContext:
+          readOnlyRootFilesystem: true
+      volumes:
+        - name: run
+          hostPath:
+            path: /run
+        - name: cni
+          hostPath:
+            path: /etc/cni/net.d
+        - name: flannel-cfg
+          configMap:
+            name: kube-flannel-cfg
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: kube-flannel-cfg-windows
+  namespace: kube-system
+  labels:
+    tier: node
+    app: flannel-windows
+data:
+  10-flannel.conf.tmpl: |
+    {
+      "name": "cb0",
+      "cniVersion": "0.3.0",
+      "type": "flannel",
+      "delegate": {
+        "loopbackDSR": true
+      }
+    }
+  config.conf: |
+    {
+      "Network": "10.164.0.0/16",
+      "Backend": {
+        "Name": "cb0",
+        "Type": "alloc",
+        "NetworkType": "L2Bridge"
+      }
+    }
+  kubeconfig.conf: |
+    apiVersion: v1
+    kind: Config
+    clusters:
+    - cluster:
+        certificate-authority: c:/etc/kube-flannel/ca.crt
+        server: https://192.168.4.240:6443
+      name: default
+    contexts:
+    - context:
+        cluster: default
+        namespace: default
+        user: default
+      name: default
+    current-context: default
+    users:
+    - name: default
+      user:
+        tokenFile: c:/etc/kube-flannel/token
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: kube-flannel-ds-windows
+  namespace: kube-system
+  labels:
+    tier: node
+    app: flannel-windows
+spec:
+  selector:
+    matchLabels:
+      tier: node
+      app: flannel-windows
+  updateStrategy:
+    type: OnDelete
+  template:
+    metadata:
+      labels:
+        tier: node
+        app: flannel-windows
+      annotations:
+        scheduler.alpha.kubernetes.io/critical-pod: ""
+    spec:
+      tolerations:
+      - operator: Exists
+      serviceAccountName: flannel
+      hostNetwork: true
+      priorityClassName: system-node-critical
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+            - matchExpressions:
+              - key: type
+                operator: NotIn
+                values:
+                - virtual-kubelet
+              - key: beta.kubernetes.io/os
+                operator: In
+                values:
+                - windows
+              - key: windows.alibabacloud.com/deployment-topology
+                operator: In
+                values:
+                - "2.0"
+            - matchExpressions:
+              - key: type
+                operator: NotIn
+                values:
+                - virtual-kubelet
+              - key: kubernetes.io/os
+                operator: In
+                values:
+                - windows
+              - key: windows.alibabacloud.com/deployment-topology
+                operator: In
+                values:
+                - "2.0"
+      containers:
+      - name: kube-flannel
+        command:
+        - pwsh.exe
+        - -NoLogo
+        - -NonInteractive
+        - -File
+        - entrypoint.ps1
+        env:
+        - name: CLUSTER_DOMAIN
+          value: ""
+        - name: CLUSTER_SERVICE_CIDR
+          value: "172.16.0.0/16"
+        - name: NODE_CIDR
+          value: "192.168.0.0/16"
+        - name: NODE_NAME
+          valueFrom:
+            fieldRef:
+              apiVersion: v1
+              fieldPath: spec.nodeName
+        image: "registry-vpc.cn-hongkong.aliyuncs.com/acs/flannel-windows:v0.13.1-aliyun.3"
+        imagePullPolicy: IfNotPresent
+        volumeMounts:
+        - name: config
+          mountPath: c:/etc/kube-flannel
+        - name: cni-config
+          mountPath: c:/etc/cni/net.d
+        - name: host-config
+          mountPath: c:/host/etc/kube-flannel
+        - name: host-cni-config
+          mountPath: c:/host/etc/cni/net.d
+        - name: host-binary
+          mountPath: c:/host/opt/bin/
+        - name: host-cni-binary
+          mountPath: c:/host/opt/cni/bin/
+        - name: wins-pipe
+          mountPath: \\.\pipe\rancher_wins
+      volumes:
+      - name: config
+        projected:
+          sources:
+          - configMap:
+              name: kube-flannel-cfg-windows
+              items:
+              - key: config.conf
+                path: config.conf
+              - key: kubeconfig.conf
+                path: kubeconfig.conf
+      - name: cni-config
+        projected:
+          sources:
+          - configMap:
+              name: kube-flannel-cfg-windows
+              items:
+              - key: 10-flannel.conf.tmpl
+                path: 10-flannel.conf.tmpl
+      - name: host-config
+        hostPath:
+          path: c:/etc/kube-flannel
+          type: DirectoryOrCreate
+      - name: host-cni-config
+        hostPath:
+          path: c:/etc/cni/net.d
+          type: DirectoryOrCreate
+      - name: host-binary
+        hostPath:
+          path: c:/opt/bin
+          type: DirectoryOrCreate
+      - name: host-cni-binary
+        hostPath:
+          path: c:/opt/cni/bin
+          type: DirectoryOrCreate
+      - name: wins-pipe
+        hostPath:
+          path: \\.\pipe\rancher_wins
